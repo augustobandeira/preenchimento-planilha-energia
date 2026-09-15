@@ -424,27 +424,64 @@ def _formula_dia_perfil(sheet_num: int, row: int) -> str:
     return f'=IF(ISERROR({lookup}),"",{lookup})'
 
 
-def _preencher_perfil_semanal(wb, ws_nome: str, id_ini: int, n_dias: int):
-    """Preenche as colunas C..J (perfil minuto-a-minuto de cada dia do bloco)
-    e a coluna K (média dos dias reais) da aba M1/M2.
+ROWS_POR_DIA = 1440  # cada bloco de 1440 linhas = 1 dia (coluna B reinicia a cada bloco)
 
-    A coluna C é um helper legado do template original (usado só pela coluna
-    D) que, no template padrão, fica com uma fórmula fixa ciclando por 7
-    blocos de 1440 linhas (uma por dia da semana). Como aqui o número real de
-    dias e as abas de origem variam, reescrevemos C também — sempre apontando
-    para a primeira aba real do bloco (id_ini), que é garantida existir —
-    para não deixar referências a abas fora do intervalo criado.
+
+def _preencher_perfil_semanal(wb, ws_nome: str, id_ini: int, n_dias: int):
+    """Preenche as colunas D..J (perfil minuto-a-minuto) e a coluna K (perfil
+    médio dos dias reais) da aba M1/M2.
+
+    A coluna B reinicia a cada 1440 linhas (um bloco de 1440 linhas = um dia).
+    Cada coluna de dia (D=dia1, E=dia2, ...) só deve ter valor dentro do SEU
+    bloco de 1440 linhas — fora dele, fica em branco. Preencher a coluna
+    inteira (10080 linhas) para todo dia, como numa versão anterior, faz o
+    Excel sobrepor as 6-7 séries em cada bloco, dando a aparência de dados
+    "cruzados" no gráfico.
+
+    A coluna K é uma média separada: para cada um dos 1440 minutos de um dia
+    "típico", faz a média do mesmo horário nos n_dias dias reais — não é uma
+    média de D:J na mesma linha, já que agora D:J nunca têm mais de um valor
+    não-vazio na mesma linha.
     """
     ws = wb[ws_nome]
     colunas = ["D", "E", "F", "G", "H", "I", "J"]
+
+    # Coluna C é um helper legado do template original (usado só pela coluna D
+    # na versão de fábrica), com fórmula fixa referenciando abas fixas 8-14.
+    # Reescreve sempre apontando para id_ini (aba garantida existir) para não
+    # deixar referências a abas fora do intervalo criado.
     for row in range(2, 10082):
         ws[f"C{row}"] = f"=VLOOKUP(ROUND(B{row},8),'{id_ini}'!$N$6:$Z$1445,8,FALSE)"
-        for i, col in enumerate(colunas):
-            if i < n_dias:
-                ws[f"{col}{row}"] = _formula_dia_perfil(id_ini + i, row)
-            else:
+
+    for i, col in enumerate(colunas):
+        bloco_ini = 2 + i * ROWS_POR_DIA
+        bloco_fim = 1 + (i + 1) * ROWS_POR_DIA
+        if i < n_dias:
+            sheet_num = id_ini + i
+            for row in range(bloco_ini, bloco_fim + 1):
+                ws[f"{col}{row}"] = _formula_dia_perfil(sheet_num, row)
+        for row in range(2, 10082):
+            if row < bloco_ini or row > bloco_fim:
                 ws[f"{col}{row}"] = None
-        ws[f"K{row}"] = f'=IFERROR(AVERAGE(D{row}:J{row}),"")'
+        if i >= n_dias:
+            for row in range(2, 10082):
+                ws[f"{col}{row}"] = None
+
+    # Média por SOMA/CONTAGEM em vej de AVERAGE(): passar "" (texto literal)
+    # como argumento direto do AVERAGE trava o cálculo com #VALUE! assim que
+    # um dos dias não tem dado naquele minuto (o que é a maioria dos casos,
+    # já que cada dia real cobre só uma parte das 24h) — SUM/COUNT ignora
+    # naturalmente os dias sem dado nesse horário.
+    sheets_reais = [str(id_ini + i) for i in range(n_dias)]
+    for row in range(2, 1442):
+        vlookups = [
+            f"VLOOKUP(ROUND($B{row},8),'{s}'!$N$6:$Z$1445,8,FALSE)" for s in sheets_reais
+        ]
+        valores = "+".join(f"IF(ISERROR({v}),0,{v})" for v in vlookups)
+        contagem = "+".join(f"IF(ISERROR({v}),0,1)" for v in vlookups)
+        ws[f"K{row}"] = f'=IF(({contagem})=0,"",({valores})/({contagem}))'
+    for row in range(1442, 10082):
+        ws[f"K{row}"] = None
     ws["K1"] = "Média"
 
 
